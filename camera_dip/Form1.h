@@ -1,5 +1,7 @@
 //#include "dshow_camera.h"
-//#import "qedit.dll"
+#include <opencv2\core\core.hpp>
+#include <opencv2\imgproc\imgproc.hpp>
+#include <opencv2\highgui\highgui.hpp>
 #include <windows.h>
 #include <dshow.h>
 #include <qedit.h>
@@ -7,6 +9,7 @@
 #include <assert.h>
 #include "SampleGrabberCallback.h"
 #include "failid.h"
+#include <math.h>
 
 #define WM_GRAPHNOTIFY  WM_APP+1
 #define CHECK_HR(hr) if (FAILED(hr)) { goto done; }
@@ -19,7 +22,7 @@
 
 #define SAVE_SNAP		// To save the image on clicking "One shot" botton
 #define MMTIMER			// Enable multimedia timer for tasking.
-#define MAX_RESOL_LIST_NUM	500	// Max. number of item of the resolution list.
+#define MAX_RESOL_LIST_NUM	50	// Max. number of item of the resolution list.
 HWND ghApp=0;
 DWORD g_dwGraphRegister=0;
 
@@ -103,6 +106,8 @@ namespace camera_dip {
 		Form1(void)
 		{
 			InitializeComponent();
+
+			brightness = 1;
 			//
 			//TODO: Add the constructor code here
 
@@ -194,7 +199,16 @@ namespace camera_dip {
 	private: BitmapData^ sampleBMPData;
 	private: System::Drawing::Rectangle rect;
 
+	// For image processing
+	private: unsigned char* pGrayImag;
+	private: float brightness;
+
 	private: String^	bmpFormat;
+
+	// OpenCV
+	cv::Mat* cvSrcImg;
+	cv::Mat* cvDstImg;
+	cv::Mat* cvGrayImg;
 	public:	 bool	APP_FAILED;	
 	
 	// MMTimer		
@@ -204,7 +218,8 @@ namespace camera_dip {
 
 
 	#ifdef DEBUG
-	Stopwatch^ gstopWatch;	
+	Stopwatch^ gstopWatch;
+	unsigned int processing_time;
 	#endif
 private: System::Windows::Forms::Button^  button1;
 private: System::Windows::Forms::Button^  button2;
@@ -218,6 +233,7 @@ private: System::Windows::Forms::Label^  label4;
 private: System::Windows::Forms::ToolStripStatusLabel^  toolStripStatusLabel4;
 private: System::Windows::Forms::ToolStripMenuItem^  capturePinToolStripMenuItem;
 private: System::Windows::Forms::ToolStripMenuItem^  cameraPropertyToolStripMenuItem;
+private: System::Windows::Forms::TrackBar^  trackBar1;
 
 	private:
 		/// <summary>
@@ -260,9 +276,11 @@ private: System::Windows::Forms::ToolStripMenuItem^  cameraPropertyToolStripMenu
 			this->label2 = (gcnew System::Windows::Forms::Label());
 			this->label3 = (gcnew System::Windows::Forms::Label());
 			this->label4 = (gcnew System::Windows::Forms::Label());
+			this->trackBar1 = (gcnew System::Windows::Forms::TrackBar());
 			this->menuStrip1->SuspendLayout();
 			(cli::safe_cast<System::ComponentModel::ISupportInitialize^  >(this->pictureBox1))->BeginInit();
 			this->statusStrip1->SuspendLayout();
+			(cli::safe_cast<System::ComponentModel::ISupportInitialize^  >(this->trackBar1))->BeginInit();
 			this->SuspendLayout();
 			// 
 			// menuStrip1
@@ -496,11 +514,22 @@ private: System::Windows::Forms::ToolStripMenuItem^  cameraPropertyToolStripMenu
 			this->label4->TabIndex = 12;
 			this->label4->Text = L"0";
 			// 
+			// trackBar1
+			// 
+			this->trackBar1->Location = System::Drawing::Point(826, 89);
+			this->trackBar1->Maximum = 255;
+			this->trackBar1->Name = L"trackBar1";
+			this->trackBar1->Size = System::Drawing::Size(156, 45);
+			this->trackBar1->TabIndex = 13;
+			this->trackBar1->Value = 1;
+			this->trackBar1->Scroll += gcnew System::EventHandler(this, &Form1::trackBar1_Scroll);
+			// 
 			// Form1
 			// 
 			this->AutoScaleDimensions = System::Drawing::SizeF(6, 12);
 			this->AutoScaleMode = System::Windows::Forms::AutoScaleMode::Font;
 			this->ClientSize = System::Drawing::Size(1064, 545);
+			this->Controls->Add(this->trackBar1);
 			this->Controls->Add(this->label4);
 			this->Controls->Add(this->label3);
 			this->Controls->Add(this->label2);
@@ -522,6 +551,7 @@ private: System::Windows::Forms::ToolStripMenuItem^  cameraPropertyToolStripMenu
 			(cli::safe_cast<System::ComponentModel::ISupportInitialize^  >(this->pictureBox1))->EndInit();
 			this->statusStrip1->ResumeLayout(false);
 			this->statusStrip1->PerformLayout();
+			(cli::safe_cast<System::ComponentModel::ISupportInitialize^  >(this->trackBar1))->EndInit();
 			this->ResumeLayout(false);
 			this->PerformLayout();
 
@@ -1016,12 +1046,15 @@ private: int GetDeviceFormat(IBaseFilter **ppFilter){
 									bmpFormat = String::Format("Unknown");
 									break;
 							}
+							float FPS = 10000000.0F/(float)videoInfoHeader->AvgTimePerFrame;
+							if((int)FPS % 5 != 0 || FPS <5)
+								continue;
 								// Add the resolution to the "Option->Resolution" menu.
 								this->resolutionItem = gcnew ToolStripMenuItem();
 								this->resolutionToolStripMenuItem->DropDownItems->AddRange(gcnew cli::array< System::Windows::Forms::ToolStripItem^  >(1) {this->resolutionItem});
 								this->resolutionItem->Text = String::Format("{0,-8}{1}{2,-8}{3,6}{4,5}-bit @ {5:F} FPS",
 									videoInfoHeader->bmiHeader.biWidth,String::Format("X"),videoInfoHeader->bmiHeader.biHeight,
-									bmpFormat,videoInfoHeader->bmiHeader.biBitCount,10000000.0/(float)videoInfoHeader->AvgTimePerFrame);
+									bmpFormat,videoInfoHeader->bmiHeader.biBitCount,10000000.0F/(float)videoInfoHeader->AvgTimePerFrame);
 								this->resolutionItem->Click += gcnew System::EventHandler(this,&Form1::resolutionItem_Click);
 								this->resolutionItem->CheckOnClick = false;
 								resolList[resolCount++]=(UINT)i;
@@ -1136,6 +1169,18 @@ private: int SetResolution_WH(IBaseFilter **ppFilter,UINT width,UINT height){
 				}
 				delete pSCC;
 				_DeleteMediaType(pMt);
+
+				if(!cvSrcImg)
+					delete(cvSrcImg);
+				if(!cvDstImg)
+					delete(cvDstImg);
+				if(!cvGrayImg)
+					delete(cvGrayImg);
+
+					cvSrcImg = new cv::Mat(cv::Size(dispBMP->Width,dispBMP->Height),CV_8UC3);
+					cvDstImg = new cv::Mat(cv::Size(dispBMP->Width,dispBMP->Height),CV_8UC1);
+					cvGrayImg = new cv::Mat(cv::Size(dispBMP->Width,dispBMP->Height),CV_8UC1);
+
 				return 1;
 		 }
 private: int SetResolution(IBaseFilter **ppFilter,UINT streamCapsIndex){
@@ -1201,6 +1246,19 @@ private: int SetResolution(IBaseFilter **ppFilter,UINT streamCapsIndex){
 				#endif
 				delete pSCC;
 				_DeleteMediaType(pMt);
+
+				if(!cvSrcImg)
+					delete(cvSrcImg);
+				if(!cvDstImg)
+					delete(cvDstImg);
+				if(!cvGrayImg)
+					delete(cvGrayImg);
+
+					cvSrcImg = new cv::Mat(cv::Size(dispBMP->Width,dispBMP->Height),CV_8UC3);
+					cvDstImg = new cv::Mat(cv::Size(dispBMP->Width,dispBMP->Height),CV_8UC1);
+					cvGrayImg = new cv::Mat(cv::Size(dispBMP->Width,dispBMP->Height),CV_8UC1);
+
+
 				return hr;
 		 }
 private: HRESULT InitSampleGrabber(bool oneshot){
@@ -1606,7 +1664,34 @@ inline int RenderPictureBox(BYTE* pSample){
 			 pictureBox1->Image = dynamic_cast<Image^>(dispBMP);
 			 return 0;	
 }
+inline int RenderPictureBoxCH(BYTE* pSample,unsigned char CH){
+	
+			 dispBMPData = dispBMP->LockBits(rect,ImageLockMode::ReadWrite, dispBMP->PixelFormat);
+			 unsigned char* ptr = (unsigned char*)(void*)dispBMPData->Scan0;
+			 int padding0 = dispBMPData->Stride-dispBMPData->Width*3;
 
+			 // Buffer form sample grabber is Y-flip.
+			 // The Bitmap data has to scan backward.
+			 ptr +=  dispBMPData->Stride*(dispBMPData->Height-1); // Head of the last line
+			 for(int j=0;j<dispBMPData->Height;j++)
+			 {
+				 for(int i=0;i<dispBMPData->Width;i++)
+				 {
+					 *ptr=*pSample;			//Blue
+					 *(ptr+1)=(0); //Green
+					 *(ptr+2)=(0); //Red		
+					 ptr+=3;				
+					 pSample+=3;
+				 }
+				 // Back to the next head of the line.
+				  ptr = ptr - (dispBMPData->Stride- padding0)-(dispBMPData->Stride- padding0)+padding0; 
+			 }
+
+			 dispBMP->UnlockBits(dispBMPData);
+			 //dispBMP->RotateFlip(RotateFlipType::RotateNoneFlipY);
+			 pictureBox1->Image = dynamic_cast<Image^>(dispBMP);
+			 return 0;
+}
 // Release the format block for a media type.
 void _FreeMediaType(AM_MEDIA_TYPE& mt)
 {
@@ -1947,10 +2032,10 @@ private: System::Void button2_Click(System::Object^  sender, System::EventArgs^ 
 #endif
 		 }
 private: System::Void button3_Click(System::Object^  sender, System::EventArgs^  e) {
-
-			 InitSampleGrabber(false); // Continuous mode
+			 
 			 if(!grabberCBIsRunning)
-			 {					 
+			 {
+				 InitSampleGrabber(false); // Continuous mode
 				 pGrabber->SetCallback((ISampleGrabberCB *)gsampleGrabberCB,1);
 				 pMediaCtrl->Run();
 				 grabberCBIsRunning = true;
@@ -1969,6 +2054,77 @@ private: System::Void button3_Click(System::Object^  sender, System::EventArgs^ 
 
 private: inline System::Void MMTimer_ISR( int id, int msg, IntPtr user, int dw1, int dw2 )
    {
+	   /*
+		if(gsampleGrabberCB->pImagBuffer!=0)
+		{
+			unsigned char* ptr = gsampleGrabberCB->pImagBuffer;
+			for(int j=0;j<dispBMPData->Height;j++)
+			 {
+				 for(int i=0;i<dispBMPData->Width;i++)
+				 {
+					 //cv::Mat tempImg(cv::Size(dispBMPData->Width,dispBMPData->Height),CV_8UC3); 
+					 //cv::Mat tempImg(cv::Size(dispBMPData->Width,dispBMPData->Height),CV_8UC3); 
+
+					
+					 //float Y = ((float)*ptr)*0.0772 + ((float)*(ptr+1))*0.7152 + ((float)*(ptr+2))*0.2126;
+					 //*ptr=Y;			//Blue
+					 //*(ptr+1)=Y; //Green
+					 //*(ptr+2)=Y; //Red		
+					 //ptr+=3;				
+				 }
+			 }
+
+		}*/
+
+	   //gsampleGrabberCB->pImagBuffer;
+	   #ifdef DEBUG			
+			 gstopWatch->Start();
+	   #endif
+       cvSrcImg->data = gsampleGrabberCB->pImagBuffer;
+	   //unsigned char* ptr = (cvSrcImg->data);
+	   //for(int i=0;i<cvSrcImg->rows;i++)
+	   //{
+		  // for(int col=0;col<cvSrcImg->cols;col++)
+		  // {
+		  // 				
+				//	 float Y = ((float)*ptr)*0.0772 + ((float)*(ptr+1))*0.7152 + ((float)*(ptr+2))*0.2126;
+				//	 *ptr=Y;			//Blue
+				//	 *(ptr+1)=Y; //Green
+				//	 *(ptr+2)=Y; //Red		
+				//	 ptr+=3;	
+			 // 
+		  // }
+	   //}
+	   //cvDstImg->data = cvSrcImg->data;
+	   //cv::cvtColor(*cvSrcImg,*cvGrayImg,CV_BGR2GRAY);
+
+	   //unsigned char* ptr = (cvGrayImg->data);
+	   //for(int i=0;i<cvGrayImg->rows;i++)
+	   //{
+		  // for(int col=0;col<cvGrayImg->cols;col++)
+		  // {
+			 //  //float Y = ((float)*ptr)*0.0772 + ((float)*(ptr+1))*0.7152 + ((float)*(ptr+2))*0.2126;
+			 //  unsigned char s = 0;
+			 //  //unsigned char negative = 254-(*ptr);
+			 //  //float temp =50.0F*log10f((1.0F+(float)(*ptr)));
+			 //  unsigned char L = (*ptr)&0x20;
+			 //  s = L;
+			 //  *ptr=s;
+			 //  ptr+=1;				  
+		  // }
+	   //}
+	   //cv::threshold(*cvGrayImg,*cvDstImg,100,255,CV_THRESH_BINARY);
+	   //cv::blur(*cvGrayImg,*cvGrayImg,cv::Size(3,3));
+	   //cv::Canny(*cvGrayImg,*cvDstImg,100,100);
+	   //cv::Laplacian(*cvGrayImg,*cvGrayImg,CV_8U);
+	   //*cvGrayImg = *cvGrayImg*(brightness);
+	   //cvGrayImg->copyTo(*cvDstImg);
+	   cvSrcImg->copyTo(*cvDstImg);
+	   #ifdef DEBUG			
+		gstopWatch->Stop();
+		processing_time = gstopWatch->ElapsedMilliseconds;
+		gstopWatch->Reset();
+	   #endif
 	   this->BeginInvoke(gcnew TestEventHandler(this, &Form1::ShowTick));
    }
 private: inline void ShowTick()	// Dialog updating should be implemented here.
@@ -1990,11 +2146,15 @@ private: inline void ShowTick()	// Dialog updating should be implemented here.
 		   	#ifdef DEBUG			
 			 gstopWatch->Start();
 			#endif
-			RenderPictureBox(gsampleGrabberCB->pImagBuffer);
+			//RenderPictureBox(gsampleGrabberCB->pImagBuffer);
+			 //RenderPictureBox(cvDstImg->data);
+			 
+			 RenderPictureBoxCH(cvDstImg->data,1);
 			#ifdef DEBUG
 			 gstopWatch->Stop();			 
 			 textBox1->AppendText(String::Format("Render time:{0:D} ms\r\n",gstopWatch->ElapsedMilliseconds));		
-			 gstopWatch->Reset();			
+			 gstopWatch->Reset();
+			 textBox1->AppendText(String::Format("Processing time:{0:D} ms\r\n",processing_time));		
 			#endif
 	   }
 }
@@ -2098,6 +2258,10 @@ private: System::Void cameraPropertyToolStripMenuItem_Click(System::Object^  sen
 					FilterInfo.pGraph->Release(); 
 					CoTaskMemFree(caGUID.pElems);
 				}
+		 }
+private: System::Void trackBar1_Scroll(System::Object^  sender, System::EventArgs^  e) {
+
+			 brightness = trackBar1->Value;
 		 }
 };
 
